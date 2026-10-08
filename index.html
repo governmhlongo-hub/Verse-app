@@ -195,4 +195,115 @@ async function searchView(t){
  let low=s.toLowerCase();
  let pm=L.map(p=>{let l=p.body.split("\n").find(x=>x.toLowerCase().includes(low));return `<div>${l?`<p class="muted" style="margin:0 0 6px">Matched: “${esc(l.trim())}”</p>`:""}${card(p)}</div>`}).join("");
  let po=P.map(u=>`<div class="cmt"><button class="link" onclick="profileView('${u.id}')"><b>${esc(u.nick||u.name)}</b></button> <span class="muted">${esc(u.bio||"")}</span></div>`).join("");
- show(`<main class="container"><form onsubmit="event.preventDefault();searchView($('sq').value)"><div class="field"><input id="sq" placeholder="Search a line, poem, poet or category" value="${esc(q)}"></div><button class="primary">Search</button></form>${s?`<h2 style="margin-top:30px">Poets (${P.length})</h2>${po||`<p class="muted">No poets found.</p>`}<h2 style="margin-top:30px">Poems (${L.length})</h2><div class="grid">${pm||`<div class="empt
+ show(`<main class="container"><form onsubmit="event.preventDefault();searchView($('sq').value)"><div class="field"><input id="sq" placeholder="Search a line, poem, poet or category" value="${esc(q)}"></div><button class="primary">Search</button></form>${s?`<h2 style="margin-top:30px">Poets (${P.length})</h2>${po||`<p class="muted">No poets found.</p>`}<h2 style="margin-top:30px">Poems (${L.length})</h2><div class="grid">${pm||`<div class="empty">No poems found.</div>`}</div>`:`<p class="muted" style="margin-top:20px">Try a line you remember from a poem.</p>`}</main>`)
+}
+
+/* ---------- PROFILE ---------- */
+async function profileView(uid){
+ uid=uid||me.id;let own=uid===me.id;
+ let [u,f,po,rm]=await Promise.all([
+  sb.from("profiles").select("id,name,nick,bio").eq("id",uid).single(),
+  sb.from("follows").select("*",{count:"exact",head:true}).eq("following_id",uid),
+  sb.from("poem_feed").select("*").eq("author_id",uid).eq("status","published").order("published_at",{ascending:false}),
+  own?sb.from("poems").select("id,title").eq("author_id",uid).eq("status","removed"):Promise.resolve({data:[]})]);
+ if(u.error)return fail(u.error);
+ let x=u.data,list=po.data||[],rl=rm.data||[];names[x.id]=x;let rmh=own&&rl.length?`<h2 style="margin-top:30px">Removed poems</h2><p class="muted">These were removed after review. You can appeal each one.</p>${rl.map(y=>`<div class="cmt">${esc(y.title)} <button class="link" onclick="appealPoem('${y.id}')">Appeal</button></div>`).join("")}`:"";
+ show(`<main class="container"><div class="profile-head"><div class="avatar">${esc((x.nick||x.name)[0]||"?")}</div><div><h1 style="margin:0">${esc(x.nick||x.name)}</h1><div class="muted">${f.count||0} followers</div></div><span class="right">${followBtn(uid,"")}</span></div><div class="card"><h2>About</h2>${own?`<div class="field"><label>Nickname (shown on your poems)</label><input id="nick" maxlength="40" value="${esc(x.nick||"")}" placeholder="${esc(x.name)}"></div><div class="field"><label>Bio</label><textarea id="bio" rows="3" maxlength="500">${esc(x.bio)}</textarea></div><button class="primary" onclick="saveProfile()">Save profile</button>`:`<p class="muted">${esc(x.bio||"No bio yet.")}</p>`}</div>${rmh}<h2 style="margin-top:30px">Poems</h2><div class="grid">${list.length?list.map(card).join(""):`<div class="empty">No poems yet.</div>`}</div></main>`)
+}
+async function saveProfile(){
+ let n=$("nick").value.trim()||null;
+ let {error}=await sb.from("profiles").update({nick:n,bio:$("bio").value.trim()}).eq("id",me.id);
+ if(error)return alert(error.code==="23505"?"That nickname is taken.":error.message);
+ me.nick=n;alert("Profile saved.")
+}
+
+/* ---------- REPORT COMMENTS / APPEALS ---------- */
+async function reportComment(id){
+ let k=prompt("Why are you reporting this comment?\n1 Spam\n2 Abusive\n3 Harassment\n4 Other","2"),R={1:"Spam",2:"Abusive",3:"Harassment",4:"Other"}[(k||"").trim()];
+ if(!R)return;
+ let {error}=await sb.rpc("submit_comment_report",{p_comment:id,p_reason:R});
+ alert(error?error.message:"Thanks. A reviewer will look at it. Your report is anonymous.")
+}
+async function appealPoem(id){
+ let m=prompt("Why should this poem be restored?");if(!m||!m.trim())return;
+ let {error}=await sb.rpc("appeal_removal",{p_poem:id,p_message:m.trim()});
+ alert(error?error.message:"Appeal sent. An admin will review it.")
+}
+
+/* ---------- STAFF ---------- */
+async function staffView(k){
+ if(!me||me.role==="user")return home();
+ k=k||"reports";let admin=me.role==="admin",body="";
+ let tabs=[["reports","Poem reports"],["comments","Comment reports"],...(admin?[["appeals","Appeals"],["log","Log"]]:[])].map(([a,l])=>`<button class="chip ${k===a?"on":""}" onclick="staffView('${a}')">${l}</button>`).join("");
+ if(k==="reports"){
+  let {data:R,error}=await sb.from("reports").select("*").eq("status","open").order("created_at");if(error)return fail(error);
+  let ids=[...new Set(R.map(r=>r.poem_id))],P=ids.length?(await sb.from("poems").select("*").in("id",ids)).data||[]:[];
+  await loadNames(P.map(p=>p.author_id));
+  body=P.map(p=>{let rs=R.filter(r=>r.poem_id===p.id),c={};rs.forEach(r=>c[r.reason]=(c[r.reason]||0)+1);return `<div class="card" style="margin-bottom:14px"><b>${Object.entries(c).map(([a,n])=>esc(a)+" ×"+n).join(", ")}</b> · <span class="muted">${esc(nm(p.author_id))} · ${esc(p.rating)}</span><h3>${esc(p.title)}</h3><div class="poem-preview">${esc(p.body.slice(0,400))}</div><div class="actions"><button class="danger" onclick="resolveR('${rs[0].id}',true)">Remove poem</button><button class="ghost" onclick="resolveR('${rs[0].id}',false)">Dismiss</button></div></div>`}).join("")||`<div class="empty">No open poem reports.</div>`
+ }else if(k==="comments"){
+  let {data:R,error}=await sb.from("comment_reports").select("*").eq("status","open").order("created_at");if(error)return fail(error);
+  let ids=[...new Set(R.map(r=>r.comment_id))],C=ids.length?(await sb.from("comments").select("*").in("id",ids)).data||[]:[];
+  await loadNames(C.map(c=>c.author_id));
+  body=C.map(c=>{let rs=R.filter(r=>r.comment_id===c.id);return `<div class="card" style="margin-bottom:14px"><b>${[...new Set(rs.map(r=>r.reason))].join(", ")} ×${rs.length}</b> · <span class="muted">${esc(nm(c.author_id))}</span><p>${esc(c.body)}</p><div class="actions"><button class="danger" onclick="resolveC('${rs[0].id}',true)">Delete comment</button><button class="ghost" onclick="resolveC('${rs[0].id}',false)">Dismiss</button></div></div>`}).join("")||`<div class="empty">No open comment reports.</div>`
+ }else if(k==="appeals"){
+  let {data:A,error}=await sb.from("appeals").select("*").eq("status","open").order("created_at");if(error)return fail(error);
+  let ids=A.map(a=>a.poem_id),P=ids.length?(await sb.from("poems").select("*").in("id",ids)).data||[]:[];
+  await loadNames(A.map(a=>a.author_id));
+  body=A.map(a=>{let p=P.find(x=>x.id===a.poem_id)||{title:"(deleted)",body:""};return `<div class="card" style="margin-bottom:14px"><b>${esc(nm(a.author_id))}</b> appealed: “${esc(a.message)}”<h3>${esc(p.title)}</h3><div class="poem-preview">${esc(p.body.slice(0,400))}</div><div class="actions"><button class="primary" onclick="resolveA('${a.id}',true)">Restore poem</button><button class="ghost" onclick="resolveA('${a.id}',false)">Uphold removal</button></div></div>`}).join("")||`<div class="empty">No open appeals.</div>`
+ }else{
+  let {data:L,error}=await sb.from("mod_actions").select("*").order("created_at",{ascending:false}).limit(50);if(error)return fail(error);
+  await loadNames(L.flatMap(l=>[l.actor_id,l.user_id]));
+  body=L.map(l=>`<div class="cmt"><b>${esc(l.action)}</b> · ${esc(nm(l.actor_id))}${l.user_id?" → "+esc(nm(l.user_id)):""} <span class="meta">${new Date(l.created_at).toLocaleString()}</span>${l.note?`<p>${esc(l.note)}</p>`:""}</div>`).join("")||`<div class="empty">Nothing logged yet.</div>`
+ }
+ show(`<main class="container"><h1>Staff</h1><p class="muted">Reporters are anonymous. Nothing is removed until you decide.</p><div class="chips">${tabs}</div>${body}</main>`)
+}
+async function resolveR(id,rm){let n=prompt("Note for the log (optional):","");if(n===null)return;let {error}=await sb.rpc("resolve_report",{p_report:id,p_remove:rm,p_note:n||null});if(error)return alert(error.message);staffView("reports")}
+async function resolveC(id,del){let n=prompt("Note for the log (optional):","");if(n===null)return;let {error}=await sb.rpc("resolve_comment_report",{p_report:id,p_delete:del,p_note:n||null});if(error)return alert(error.message);staffView("comments")}
+async function resolveA(id,restore){let n=prompt("Note for the log (optional):","");if(n===null)return;let {error}=await sb.rpc("resolve_appeal",{p_appeal:id,p_restore:restore,p_note:n||null});if(error)return alert(error.message);staffView("appeals")}
+
+/* ---------- TERMS, PRIVACY, SUPPORT ---------- */
+function legalView(k){
+ const O=esc(OWNER),C=esc(CONTACT),U=esc(UPDATED);
+ const T={
+ terms:`<h1>Terms of Use</h1><p class="meta">Last updated: ${U}</p><p>Verse is a place to share original poetry. By using it you agree to these terms. Verse is run by ${O} (${C}).</p><h2>Who can use Verse</h2><p>You must be 18 or older. You log in with a code sent to your email, so keep your inbox secure. You are responsible for what happens on your account.</p><h2>Your poems</h2><p>You keep ownership of your poems. By posting, you give Verse permission to show and share them inside the app. Only post work you wrote yourself. Copying another poet's lines is not allowed, and copied poems will be removed. If you delete a poem, it comes down from Verse.</p><h2>Rules</h2><ul><li>No hate, harassment, threats or bullying.</li><li>No sexual content involving minors, and no pornography.</li><li>No spam, fake accounts or impersonation.</li><li>No content that encourages or gives instructions for self-harm or suicide. Poems about pain are welcome. Instructions and encouragement are not.</li><li>Rate your poem honestly. Pick 16+ if it has mature themes.</li></ul><h2>Posting limits</h2><p>To keep things fair, poems need at least 35 words, and each person can publish 2 poems a day and 10 a month.</p><h2>Reports and moderation</h2><p>Anyone can report a poem or comment. Reports are anonymous. Staff review them and may remove content or suspend accounts that break these rules. If your poem is removed, you can appeal from your profile.</p><h2>Money</h2><p>Verse does not currently show earnings or pay poets. If that changes, we will update these terms first.</p><h2>Copyright complaints</h2><p>If you think a poem copies your work, email ${C} with a link and details.</p><h2>Limits of responsibility</h2><p>Verse is provided as is. To the extent the law allows, we are not responsible for losses from using it. We may change these terms, and continuing to use Verse means you accept the changes. These terms follow the laws of South Africa.</p>`,
+ privacy:`<h1>Privacy Policy</h1><p class="meta">Last updated: ${U}</p><p>The responsible party for your information is ${O}. Contact: ${C}.</p><h2>What we collect</h2><ul><li>Your email address, used to log you in.</li><li>Your name, nickname and bio.</li><li>Your poems, comments, likes and follows.</li><li>Your reports. Staff cannot see who made a report.</li><li>Basic technical data such as your IP address, kept by our hosting providers.</li></ul><h2>Why we use it</h2><p>To run your account, send login codes, show your poems, keep Verse safe and enforce our rules.</p><h2>What other people can see</h2><p>Your name or nickname, bio, poems, comments and who you follow are visible to other members. Your email address is not shown to other members. Only the person running Verse can access it.</p><h2>Who we share it with</h2><p>We do not sell your information. We use services to run Verse: Supabase (database and login), an email service (to send login codes) and a hosting provider. They only process data for us.</p><h2>How long we keep it</h2><p>While your account is open. Ask us to delete your account and we will remove your information, apart from what the law requires us to keep and short-term backups.</p><h2>Your rights</h2><p>Under POPIA you can ask to see, correct or delete your information, or object to how we use it. Email ${C}. You can also complain to the Information Regulator of South Africa.</p><h2>Security</h2><p>Data is sent over secure connections and access is restricted by account rules. No system is perfectly secure. If a breach affects you, we will tell you as the law requires.</p><h2>Age</h2><p>Verse is for people 18 and older.</p><h2>Browser storage</h2><p>Verse stores a login session in your browser so you stay signed in. We do not use advertising trackers today. If we add ads, we will update this policy first.</p>`,
+ help:`<h1>Need support?</h1><p>If a poem or a feeling is heavy, you don't have to carry it alone.</p><ul><li><b>SADAG Suicide Crisis Helpline:</b> 0800 567 567 (free, 24 hours)</li><li><b>SADAG emergency SMS:</b> 31393</li><li><b>Cipla mental health helpline:</b> 0800 456 789</li></ul><p>If you are in immediate danger, go to your nearest emergency service or hospital.</p>`}[k];
+ let h=`<main class="container legal"><div class="reader"><button class="ghost" onclick="${me?"home()":"loginView()"}">← Back</button>${T}</div></main>`;
+ if(me)show(h);else $("app").innerHTML=h
+}
+
+
+/* ---------- TERMS POP-UP ---------- */
+let okNow=false;
+function agreed(){if(okNow)return true;try{return localStorage.getItem("verse_terms_v1")==="1"}catch(e){return false}}
+function askTerms(next){
+ let o=document.createElement("div");o.className="modal";
+ o.innerHTML=`<div class="modalbox"><h2>Before you continue</h2><p>By continuing with this you agree to our <button class="link" id="tl">Terms of Use</button> and <button class="link" id="pl">Privacy Policy</button>, and you confirm you're 18 or older.</p><div class="actions"><button class="primary" id="ya">I agree</button><button class="ghost" id="no">I disagree</button></div></div>`;
+ document.body.appendChild(o);
+ o.querySelector("#ya").onclick=()=>{okNow=true;try{localStorage.setItem("verse_terms_v1","1")}catch(e){}o.remove();next()};
+ o.querySelector("#no").onclick=()=>{okNow=false;o.remove();pending="";cool=0;loginView();say("No agree, no entry. Back to the start we go 😂")};
+ o.querySelector("#tl").onclick=()=>{o.remove();legalView("terms")};
+ o.querySelector("#pl").onclick=()=>{o.remove();legalView("privacy")}
+}
+
+/* ---------- START (shows errors on screen instead of a blank page) ---------- */
+function showErr(m){$("app").innerHTML=`<div class="auth"><div class="authbox"><div class="brand">verse<span>.</span></div><h1>Something went wrong</h1><p class="muted">${esc(m)}</p><button class="primary" style="width:100%" onclick="location.reload()">Try again</button></div></div>`}
+window.addEventListener("error",e=>{if(!$("app").innerHTML.trim())showErr(e.message||"Unknown error")});
+window.addEventListener("unhandledrejection",e=>{if(!$("app").innerHTML.trim())showErr(String((e.reason&&e.reason.message)||e.reason))});
+function loadLib(u){return new Promise((ok,no)=>{let t=document.createElement("script");t.src=u;t.onload=ok;t.onerror=no;document.head.appendChild(t)})}
+async function start(){
+ try{
+  if(!window.supabase){
+   for(const u of ["https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2","https://unpkg.com/@supabase/supabase-js@2"]){
+    try{await loadLib(u);if(window.supabase)break}catch(e){}
+   }
+  }
+  if(!window.supabase)return showErr("Couldn't load the login library. Check your internet connection (or turn off any ad blocker or private DNS) and try again.");
+  await boot()
+ }catch(e){showErr(e.message||String(e))}
+}
+start();
+
+</script>
+</body>
+</html>
